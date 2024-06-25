@@ -1,0 +1,15 @@
+- name: Install k8s components 
+  hosts: all
+  become: true
+  tasks:
+    - import_tasks: kubernetes.yaml
+
+- name: Initialize k8s cluster
+  hosts: controlplane_nodes
+  become: no
+  vars_files:
+    - variables.yaml
+  tasks:
+    - import_tasks: kubeadm_cluster_init.yaml
+  handlers:
+    - import_tasks: handlers.yaml

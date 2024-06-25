@@ -1,0 +1,142 @@
+- name: Ensure prerequisit packages are present
+  apt:
+    pkg:
+      - gpg
+      - curl
+      - apt-transport-https
+      - ca-certificates
+- name: Check repository and create if does not exist
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+- name: Installing dep
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail &&
+      echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /" |
+      sudo tee /etc/apt/sources.list.d/kubernetes.list &&
+      curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg &&
+      sudo apt-get update
+  args:
+    executable: /bin/bash
+    creates: /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+- name: Install k8s components # sudo apt-mark hold kubelet kubeadm kubectl this has to be added
+  apt:
+    pkg:
+      - kubelet
+      - kubeadm
+      - kubectl
+- name: Enable ipv4 forwarding
+  ansible.builtin.lineinfile:
+    path: /etc/sysctl.d/k8s.conf
+    line: net.ipv4.ip_forward = 1
+    create: true
+    mode: '0644'
+- name: Download ContainerD files
+  ansible.builtin.get_url:
+    url: https://github.com/containerd/containerd/releases/download/v1.7.18/containerd-1.7.18-linux-amd64.tar.gz
+    dest: /tmp
+    mode: '0550'
+    checksum: sha256:https://github.com/containerd/containerd/releases/download/v1.7.18/containerd-1.7.18-linux-amd64.tar.gz.sha256sum
+  register: download_result
+- name: Extract ContainerD Files
+  ansible.builtin.unarchive:
+    src: "{{ download_result.dest }}"
+    dest: /usr/local
+    remote_src: true
+- name: Download and verify checksum of RunC
+  ansible.builtin.get_url:
+    url: https://github.com/opencontainers/runc/releases/download/v1.1.13/runc.amd64
+    dest: /tmp
+    mode: '0550'
+    checksum: sha256:https://github.com/opencontainers/runc/releases/download/v1.1.13/runc.sha256sum
+  register: runc_download_return
+- name: Install runc
+  ansible.builtin.command:
+    cmd: install -m 755 "{{  runc_download_return.dest  }}" /usr/local/sbin/runc
+    creates: /usr/local/sbin/runc
+- name: Dowload CNI plugins
+  ansible.builtin.get_url:
+    url: https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz
+    dest: /tmp
+    mode: '0550'
+    checksum: sha256:https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz.sha256
+  register: cni_plugins_return
+- name: Check if /opt/cni/bin exists
+  ansible.builtin.stat:
+    path: /opt/cni/bin
+  register: cni_bin_check
+  changed_when: false
+- name: Create /opt/cni/bin if it does not exist
+  ansible.builtin.file:
+    path: /opt/cni/bin
+    state: directory
+    mode: "0774"
+  when: not cni_bin_check.stat.exists
+- name: Extract CNI plugins
+  ansible.builtin.unarchive:
+    src: "{{  cni_plugins_return.dest  }}"
+    dest: /opt/cni/bin
+    remote_src: true
+  when: not cni_bin_check.stat.exists
+- name: Create /usr/local/lib/systemd/system if it does not exist
+  ansible.builtin.file:
+    path: /usr/local/lib/systemd/system
+    state: directory
+    mode: "0775"
+- name: Download containerd.service to start containerd with systemd
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+    dest: /usr/local/lib/systemd/system/containerd.service
+    mode: "0775"
+- name: Enable containerd in systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+    name: containerd
+    enabled: true
+    state: started
+- name: Create directory for containerd config
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: '0775'
+- name: Create default containerd config
+  ansible.builtin.shell:
+    cmd: containerd config default > /etc/containerd/config.toml
+  args:
+    executable: /bin/bash
+    creates: /etc/containerd/config.toml
+- name: Change SystemdCgroup value for /etc/containerd/config.toml
+  ansible.builtin.lineinfile:
+    path: /etc/containerd/config.toml
+    regexp: '^SystemdCgroup'
+    line: "            SystemdCgroup = true"
+  notify: "restart containerd"      
+- name: Disable swap
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: 0
+    state: present
+    reload: true
+- name: Ensure swap is disabled permanently
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^\s*[^#]+\s+swap\s+'
+    state: absent
+- name: Load br_netfilter module
+  ansible.builtin.modprobe:
+    name: br_netfilter
+    state: present
+- name: Ensure br_netfilter module loads on boot
+  ansible.builtin.lineinfile:
+    path: /etc/modules-load.d/k8s.conf
+    create: yes
+    line: br_netfilter
+- name: Enable IP forwarding
+  ansible.builtin.sysctl:
+    name: net.ipv4.ip_forward
+    value: 1
+    sysctl_set: yes
+    state: present
+    reload: yes

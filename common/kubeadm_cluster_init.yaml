@@ -1,0 +1,22 @@
+
+- name: Initialize cluster
+  ansible.builtin.shell:
+    cmd: sudo kubeadm init --pod-network-cidr "{{  pod_network_cidr  }}"
+  args:
+    executable: /bin/bash
+    creates: /etc/kubernetes/kubelet.conf
+- name: Enable user access to k8s
+  ansible.builtin.shell:
+    cmd: |
+      mkdir -p $HOME/.kube &&
+      sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config &&
+      sudo chown $(id -u):$(id -g) $HOME/.kube/config
+  args:
+    executable: /bin/bash
+    creates: $HOME/.kube/config
+# - name: Calico add-on installation
+#   host: controlplane_nodes
+#   debugger: on_failed
+#   become: true
+#   tasks:
+#     - name:
